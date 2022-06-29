@@ -10,23 +10,24 @@ host, model parallelization is performed for faster training.
 
 @author: Álvaro Barbero Jiménez
 """
-
-from keras.models import Sequential, Model
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras.models import Sequential, Model
 from keras.layers import Conv1D, MaxPooling1D, Dense, Flatten, Input, Dropout, Activation, GlobalMaxPool1D, CuDNNLSTM
 from keras.layers import add, multiply, concatenate
-from keras.layers.embeddings import Embedding
-from keras.layers.core import Lambda
-from keras.layers.wrappers import Bidirectional
-from keras.layers.normalization import BatchNormalization
-import tensorflow as tf
+from tensorflow.keras.layers import Embedding
+from tensorflow.keras.layers import Lambda
+#from tensorflow.keras.layers.wrappers import Bidirectional
+from tensorflow.keras.layers import Bidirectional
+from tensorflow.keras.layers import BatchNormalization
 from tensorflow.python.client import device_lib
 import re
 
 
 def get_available_gpus():
     """Returns a list of the GPU devices found in the host
-    
-    Reference: 
+
+    Reference:
         - https://stackoverflow.com/questions/38559755/how-to-get-current-available-gpus-in-tensorflow
     """
     local_device_protos = device_lib.list_local_devices()
@@ -35,10 +36,10 @@ def get_available_gpus():
 
 def make_parallel(model, gpu_count):
     """Makes a keras model data-parallel on a set of gpus
-    
+
     Original code extracted from
         https://github.com/kuza55/keras-extras/blob/master/utils/multi_gpu.py
-    
+
     Modifications by Álvaro Barbero.
     """
     if gpu_count <= 1:
@@ -58,13 +59,13 @@ def make_parallel(model, gpu_count):
                 for x in model.inputs:
                     input_shape = tuple(x.get_shape().as_list())[1:]
                     slice_n = Lambda(tensorslice, output_shape=input_shape, arguments={'idx':i,'parts':gpu_count})(x)
-                    inputs.append(slice_n)                
+                    inputs.append(slice_n)
 
                 outputs = model(inputs)
-                
+
                 if not isinstance(outputs, list):
                     outputs = [outputs]
-                
+
                 # Save all the outputs for merging back together later
                 for l in range(len(outputs)):
                     outputs_all[l].append(outputs[l])
@@ -77,18 +78,18 @@ def make_parallel(model, gpu_count):
                 merged.append(concatenate(outputs, axis=0))
         else:
             merged = outputs
-            
+
         return Model(inputs=model.inputs, outputs=merged)
 
 
 def tensorslice(data, idx, parts):
     """Slices a tensor of data into several parts, as equal as possible.
-    
+
     Inputs:
         data: input data flow
         idx: index of the slice to extract
         parts: number of pieces in which to partition the data
-       
+
     If the number of data patterns is smaller than parts, some slices will
     be empty.
     """
@@ -138,7 +139,7 @@ class ParallelGpuModel(ModelMixin):
 
 class DilatedConvModel(ModelMixin):
     """Model based on dilated convolutions + pooling + dense layers"""
-    
+
     paramgrid = [
         [2, 3, 4, 5],  # convlayers
         [4, 8, 16, 32, 64],  # kernels
@@ -157,27 +158,27 @@ class DilatedConvModel(ModelMixin):
         pool_size = 2
         if convlayers < 1:
             raise ValueError("Number of layers must be at least 1")
-            
-        model = Sequential()        
+
+        model = Sequential()
         # Embedding layer
         model.add(Embedding(input_dim=vocabsize, output_dim=embedding,
                             input_length=inputtokens))
-        # First conv+pool layer        
-        model.add(Conv1D(kernels, kernel_size, padding='causal', 
+        # First conv+pool layer
+        model.add(Conv1D(kernels, kernel_size, padding='causal',
                          activation='relu'))
         model.add(Dropout(convdrop))
         model.add(MaxPooling1D(pool_size))
         # Additional dilated conv + pool layers (if possible)
         for i in range(1, convlayers):
             try:
-                model.add(Conv1D(kernels, kernel_size, padding='causal', 
+                model.add(Conv1D(kernels, kernel_size, padding='causal',
                                  dilation_rate=2**i, activation='relu'))
                 model.add(Dropout(convdrop))
                 model.add(MaxPooling1D(pool_size))
             except:
                 print("Warning: not possible to add %i-th layer, moving to output" % i)
                 break
-                
+
         # Flatten and dense layers
         model.add(Flatten())
         for i in range(denselayers):
@@ -235,24 +236,24 @@ def wavenetblock(maxdilation, dropout, kernels, kernel_size):
 
 class WavenetModel(ParallelGpuModel):
     """Implementation of Wavenet model
-    
-    The model is made of a series of blocks, each one made up of 
+
+    The model is made of a series of blocks, each one made up of
     exponentially increasing dilated convolutions, until the whole input
     sequence is covered. Residual connections are also included to speed
     up training
-    
+
     As an addition to the original formulation, ReLU activations have
     been replaced by SELU units.
-    
+
     This implementation is based on those provided by
         - https://github.com/basveeling/wavenet
         - https://github.com/usernaamee/keras-wavenet
-        
+
     The original wavenet paper is available at
         - https://deepmind.com/blog/wavenet-generative-model-raw-audio/
         - https://arxiv.org/pdf/1609.03499.pdf
     """
-    
+
     paramgrid = [
         [32, 64, 128, 256],  # kernels
         [1, 2, 3, 4, 5],  # wavenetblocks
@@ -264,7 +265,7 @@ class WavenetModel(ParallelGpuModel):
     def create(inputtokens, vocabsize, kernels=64, wavenetblocks=1, dropout=0, embedding=32):
         kernel_size = 7
         maxdilation = inputtokens
-        
+
         input_ = Input(shape=(inputtokens,), dtype='int32')
         # Embedding layer
         net = Embedding(input_dim=vocabsize, output_dim=embedding, input_length=inputtokens)(input_)
@@ -285,7 +286,7 @@ class WavenetModel(ParallelGpuModel):
         net = Flatten()(net)
         net = Dense(vocabsize, activation='softmax')(net)
         model = Model(inputs=input_, outputs=net)
-        
+
         # Make data-parallel
         ngpus = len(get_available_gpus())
         if ngpus > 1:
@@ -306,15 +307,15 @@ class SmallWavenet(WavenetModel):
 
 class StackedLSTMModel(ParallelGpuModel):
     """Implementation of stacked Long-Short Term Memory model
-    
+
     Main reference is Andrej Karpathy post on text generation with LSTMs:
         - http://karpathy.github.io/2015/05/21/rnn-effectiveness/
-    
+
     This implementation also includes an Embedding layer, a bidirectional
     LSTM as the first LSTM layer in the network, and residual connections
     for all intermediate LSTM layers.
     """
-    
+
     paramgrid = [
         [1, 2, 3, 4, 5],  # layers
         [16, 32, 64, 128, 256, 512, 1024],  # units
@@ -324,18 +325,18 @@ class StackedLSTMModel(ParallelGpuModel):
 
     @staticmethod
     def create(inputtokens, vocabsize, layers=1, units=16, dropout=0, embedding=32):
-        
+
         input_ = Input(shape=(inputtokens,), dtype='int32')
-        
+
         # Embedding layer
         net = Embedding(input_dim=vocabsize, output_dim=embedding, input_length=inputtokens)(input_)
         net = Dropout(dropout)(net)
-            
+
         # Bidirectional LSTM layer
         net = BatchNormalization()(net)
         net = Bidirectional(CuDNNLSTM(units, return_sequences=(layers > 1)))(net)
         net = Dropout(dropout)(net)
-            
+
         # Rest of LSTM layers with residual connections (if any)
         for i in range(1, layers):
             if i < layers-1:
@@ -347,11 +348,11 @@ class StackedLSTMModel(ParallelGpuModel):
                 net = BatchNormalization()(net)
                 net = CuDNNLSTM(2*units)(net)
                 net = Dropout(dropout)(net)
-                    
+
         # Output layer
         net = Dense(vocabsize, activation='softmax')(net)
         model = Model(inputs=input_, outputs=net)
-        
+
         # Make data-parallel
         ngpus = len(get_available_gpus())
         if ngpus > 1:
@@ -362,13 +363,13 @@ class StackedLSTMModel(ParallelGpuModel):
 
 class LSTMModel(ModelMixin):
     """Implementation of simple one layer bidirectional Long-Short Term Memory model
-    
+
     Main reference is Andrej Karpathy post on text generation with LSTMs:
         - http://karpathy.github.io/2015/05/21/rnn-effectiveness/
-    
+
     This implementation also includes an Embedding layer.
     """
-    
+
     paramgrid = [
         [16, 32, 64, 128, 256, 512, 1024],  # units
         (0.0, 1.0),  # dropout
